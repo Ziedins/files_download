@@ -12,7 +12,9 @@ use Symfony\Component\Console\Output\OutputInterface;
 #[AsCommand(name: 'app:download-files')]
 class DownloadFilesCommand extends Command
 {
-    private const OUTPUT_DIRECTORY = __DIR__ . '/../../downloads';
+    private const TMP_DIRECTORY = __DIR__ . '/../../tmp';
+    private const FILES_DIRECTORY = __DIR__ . '/../../downloads';
+
     private const KEY_FILE_RESOURCE = 'fileResource';
     private const KEY_FILE_PATH = 'filePath';
     private const KEY_CONTINUE = 'continue';
@@ -26,19 +28,24 @@ class DownloadFilesCommand extends Command
         try {
             $results = $this->downloadUrls($urls);
         } catch (\Exception $e) {
-            $output->writeln('<error>' . $e->getMessage() . '</error>');
+            $output->writeln('<error>' . $e->getMessage() . "</error> \n");
 
             return Command::FAILURE;
         }
 
         foreach ($results as $key => $result) {
+            $resultCode = $result[self::KEY_STATUS];
             $output->writeln(sprintf(
                 "%d: Response code : %d | %s | %s",
                 $key,
-                $result[self::KEY_STATUS],
+                $resultCode,
                 $result[self::KEY_CONTINUE] ? 'Continued' : 'Not Continued',
                 $result[self::KEY_FILE_PATH]
             ));
+
+            if (in_array($resultCode, [200, 206, 416])) {
+                $this->moveFileToCompletedFolder($result[self::KEY_FILE_PATH]);
+            }
         }
 
         return Command::SUCCESS;
@@ -56,7 +63,7 @@ class DownloadFilesCommand extends Command
 
         foreach ($urls as $url) {
             $fileName = $this->getFileNameFromUrl($url);
-            $filePath = self::OUTPUT_DIRECTORY . '/' . $fileName;
+            $filePath = self::TMP_DIRECTORY . '/' . $fileName;
             $continue = false;
             $lastByte = file_exists($filePath) ? filesize($filePath) : 0;
             $fileResource = fopen($filePath, 'a+');
@@ -74,14 +81,14 @@ class DownloadFilesCommand extends Command
                 CURLOPT_CONNECTTIMEOUT   => 3,
                 CURLOPT_NOPROGRESS       => false,
                 CURLOPT_HEADER           => false,
-                CURLOPT_PROGRESSFUNCTION => static function ($curlHandle, $bytesToDownload, $bytesDownloaded) use (
+                CURLOPT_PROGRESSFUNCTION => function ($curlHandle, $bytesToDownload, $bytesDownloaded) use (
                     $url,
                     $continue
                 ) {
                     static $lastProgress = [];
 
                     if ($bytesToDownload > 0) {
-                        if ($continue) {
+                        if ($continue && !isset($lastProgress[$url])) {
                             echo basename($url) . ' Resuming Download: ' . $bytesDownloaded . '/' . $bytesToDownload . "\n";
                         }
 
@@ -133,6 +140,19 @@ class DownloadFilesCommand extends Command
         return $results;
     }
 
+    private function moveFileToCompletedFolder(string $filePath): void
+    {
+        $fileName =  $this->getFileNameFromUrl($filePath);
+        $destinationPath = self::FILES_DIRECTORY . '/' . $fileName;
+
+        if (file_exists($destinationPath)) {
+            echo "File already exists in : " . self::FILES_DIRECTORY . " Replacing : ". $fileName . "\n";
+            unlink($destinationPath);
+        }
+
+        rename($filePath, $destinationPath);
+    }
+
     /**
      * @param string $url
      * @return string
@@ -150,8 +170,12 @@ class DownloadFilesCommand extends Command
 
     private function prepareDirectories(): void
     {
-        if (!is_dir(self::OUTPUT_DIRECTORY)) {
-            mkdir(self::OUTPUT_DIRECTORY, 0777, true);
+        if (!is_dir(self::FILES_DIRECTORY)) {
+            mkdir(self::FILES_DIRECTORY, 0777, true);
+        }
+
+        if (!is_dir(self::TMP_DIRECTORY)) {
+            mkdir(self::TMP_DIRECTORY, 0777, true);
         }
     }
 

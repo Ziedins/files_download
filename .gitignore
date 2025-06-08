@@ -8,4 +8,5 @@
 /var/
 /vendor/
 /downloads/
+/tmp/
 ###< symfony/framework-bundle ###
