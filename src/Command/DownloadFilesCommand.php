@@ -12,18 +12,23 @@ use Symfony\Component\Console\Output\OutputInterface;
 #[AsCommand(name: 'app:download-files')]
 class DownloadFilesCommand extends Command
 {
-    private const TMP_DIRECTORY = __DIR__ . '/../../tmp';
+    private const TMP_DIRECTORY   = __DIR__ . '/../../tmp';
     private const FILES_DIRECTORY = __DIR__ . '/../../downloads';
 
     private const KEY_FILE_RESOURCE = 'fileResource';
-    private const KEY_FILE_PATH = 'filePath';
-    private const KEY_CONTINUE = 'continue';
-    private const KEY_STATUS = 'status';
-    private const KEY_RETRIES = 'retries';
-    private const KEY_URL = 'url';
+    private const KEY_FILE_PATH     = 'filePath';
+    private const KEY_CONTINUE      = 'continue';
+    private const KEY_STATUS        = 'status';
+    private const KEY_RETRIES       = 'retries';
+    private const KEY_URL           = 'url';
 
 
-
+    /**
+     * @param InputInterface $input
+     * @param OutputInterface $output
+     * @return int
+     * @throws \Exception
+     */
     protected function execute(InputInterface $input, OutputInterface $output): int
     {
         $this->prepareDirectories();
@@ -128,9 +133,9 @@ class DownloadFilesCommand extends Command
                     } else {
                         echo "Max retries reached for : ". $filePath ." Skipping... \n";
                         $results[] = [
-                            self::KEY_STATUS => $code,
+                            self::KEY_STATUS    => $code,
                             self::KEY_FILE_PATH => $filePath,
-                            self::KEY_CONTINUE => $curlHandles[$curlHandle][self::KEY_CONTINUE]
+                            self::KEY_CONTINUE  => $curlHandles[$curlHandle][self::KEY_CONTINUE],
                         ];
                     }
 
@@ -148,6 +153,8 @@ class DownloadFilesCommand extends Command
     }
 
     /**
+     * @param string $url
+     * @return array
      * @throws \Exception
      */
     private function createHandleWithData(string $url): array
@@ -197,6 +204,11 @@ class DownloadFilesCommand extends Command
         return [$curlHandle, $fileResource, $filePath, $continue];
     }
 
+    /**
+     * @param string $filePath
+     * @return void
+     * @throws \Exception
+     */
     private function moveFileToCompletedFolder(string $filePath): void
     {
         $fileName =  $this->getFileNameFromUrl($filePath);
