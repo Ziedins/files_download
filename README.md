@@ -1,5 +1,5 @@
 # PHP + Curl File Downloader
- - Can download multiple files concurrently  
+ - Download multiple files concurrently  
  - Automatic retry on failure on timeouts or failures
  - Outputs progress to console
 
