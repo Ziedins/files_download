@@ -19,6 +19,10 @@ class DownloadFilesCommand extends Command
     private const KEY_FILE_PATH = 'filePath';
     private const KEY_CONTINUE = 'continue';
     private const KEY_STATUS = 'status';
+    private const KEY_RETRIES = 'retries';
+    private const KEY_URL = 'url';
+
+
 
     protected function execute(InputInterface $input, OutputInterface $output): int
     {
@@ -28,7 +32,7 @@ class DownloadFilesCommand extends Command
         try {
             $results = $this->downloadUrls($urls);
         } catch (\Exception $e) {
-            $output->writeln('<error>' . $e->getMessage() . "</error> \n");
+            $output->writeln('<error>' . $e->getMessage() . "</error>");
 
             return Command::FAILURE;
         }
@@ -45,6 +49,9 @@ class DownloadFilesCommand extends Command
 
             if (in_array($resultCode, [200, 206, 416])) {
                 $this->moveFileToCompletedFolder($result[self::KEY_FILE_PATH]);
+            } else {
+                $output->writeln("<error>Unhandled Response :" . $resultCode . " : Deleting tmp file</error>");
+                unlink($result[self::KEY_FILE_PATH]);
             }
         }
 
@@ -53,91 +60,141 @@ class DownloadFilesCommand extends Command
 
     /**
      * @param array $urls
+     * @param int $retryAttempts
      * @return array
      * @throws \Exception
      */
-    private function downloadUrls(array $urls): array
+    private function downloadUrls(array $urls, int $retryAttempts = 3): array
     {
         $multiHandle = curl_multi_init();
         $curlHandles = new \WeakMap();
 
         foreach ($urls as $url) {
-            $fileName = $this->getFileNameFromUrl($url);
-            $filePath = self::TMP_DIRECTORY . '/' . $fileName;
-            $continue = false;
-            $lastByte = file_exists($filePath) ? filesize($filePath) : 0;
-            $fileResource = fopen($filePath, 'a+');
-
-            $curlHandle = curl_init();
-
-            if ($lastByte > 0) {
-                curl_setopt($curlHandle, CURLOPT_RANGE, "$lastByte-");
-                $continue = true;
-            }
-
-            curl_setopt_array($curlHandle, [
-                CURLOPT_URL              => $url,
-                CURLOPT_FILE             => $fileResource,
-                CURLOPT_CONNECTTIMEOUT   => 3,
-                CURLOPT_NOPROGRESS       => false,
-                CURLOPT_HEADER           => false,
-                CURLOPT_PROGRESSFUNCTION => function ($curlHandle, $bytesToDownload, $bytesDownloaded) use (
-                    $url,
-                    $continue
-                ) {
-                    static $lastProgress = [];
-
-                    if ($bytesToDownload > 0) {
-                        if ($continue && !isset($lastProgress[$url])) {
-                            echo basename($url) . ' Resuming Download: ' . $bytesDownloaded . '/' . $bytesToDownload . "\n";
-                        }
-
-                        $percent = round(($bytesDownloaded / $bytesToDownload) * 100);
-                        if (!isset($lastProgress[$url]) || $percent - $lastProgress[$url] >= 5) {
-                            echo basename($url) . ' Downloaded: ' . $percent . "%\n";
-                            $lastProgress[$url] = $percent;
-                        }
-                    }
-
-                    return 0;
-                },
-            ]);
-
+            [$curlHandle, $fileResource, $filePath, $continue] = $this->createHandleWithData($url);
             curl_multi_add_handle($multiHandle, $curlHandle);
             $curlHandles[$curlHandle] = [
                 self::KEY_FILE_RESOURCE => $fileResource,
+                self::KEY_URL           => $url,
                 self::KEY_FILE_PATH     => $filePath,
-                self::KEY_CONTINUE     => $continue,
+                self::KEY_CONTINUE      => $continue,
+                self::KEY_RETRIES       => 0,
             ];
         }
 
         $stillRunning = 0;
-
-        do {
-            $status = curl_multi_exec($multiHandle, $stillRunning);
-            if ($stillRunning) {
-                curl_multi_select($multiHandle);
-            }
-        } while ($stillRunning && $status == CURLM_OK);
-
         $results = [];
 
-        foreach ($curlHandles as $curlHandle => $handleData) {
-            fclose($handleData[self::KEY_FILE_RESOURCE]);
-            curl_multi_remove_handle($multiHandle, $curlHandle);
-            $status = curl_getinfo($curlHandle, CURLINFO_HTTP_CODE);
-            curl_close($curlHandle);
+        do {
+            curl_multi_exec($multiHandle, $stillRunning);
+            curl_multi_select($multiHandle);
+            while ($data = curl_multi_info_read($multiHandle)) {
+                $curlHandle = $data['handle'];
+                $code = curl_getinfo($curlHandle, CURLINFO_HTTP_CODE);
+                $error = curl_errno($curlHandle);
 
-            $results[] = [
-                self::KEY_STATUS => $status,
-                self::KEY_FILE_PATH => $handleData[self::KEY_FILE_PATH],
-                self::KEY_CONTINUE => $handleData[self::KEY_CONTINUE]
-            ];
-        }
+                $filePath = $curlHandles[$curlHandle][self::KEY_FILE_PATH];
+                $retries = $curlHandles[$curlHandle][self::KEY_RETRIES];
+
+                fclose($curlHandles[$curlHandle][self::KEY_FILE_RESOURCE]);
+                curl_multi_remove_handle($multiHandle, $curlHandle);
+                curl_close($curlHandle);
+
+
+                if (($error === 0 && $code >= 200 && $code < 300) || ($error === 22 & $code === 416)) {
+                    $results[] = [
+                        self::KEY_STATUS => $code,
+                        self::KEY_FILE_PATH => $filePath,
+                        self::KEY_CONTINUE => $curlHandles[$curlHandle][self::KEY_CONTINUE]
+                    ];
+                } else {
+                    echo sprintf(
+                        "Failed to download: %s , Response status: %s , Error : %s \n",
+                        $filePath,
+                        $code,
+                        $error
+                    );
+                    if ($retries < $retryAttempts) {
+                        echo sprintf("Retrying : %s (%d + 1) \n", $filePath, $retries);
+                        $url =  $curlHandles[$curlHandle][self::KEY_URL];
+                        [$newCurlHandle, $fileResource, $filePath, $continue] = $this->createHandleWithData($url);
+                        curl_multi_add_handle($multiHandle, $newCurlHandle);
+                        $curlHandles[$newCurlHandle] = [
+                            self::KEY_FILE_RESOURCE => $fileResource,
+                            self::KEY_URL           => $url,
+                            self::KEY_FILE_PATH     => $filePath,
+                            self::KEY_CONTINUE      => $continue,
+                            self::KEY_RETRIES       => $retries + 1,
+                        ];
+                    } else {
+                        echo "Max retries reached for : ". $filePath ." Skipping... \n";
+                        $results[] = [
+                            self::KEY_STATUS => $code,
+                            self::KEY_FILE_PATH => $filePath,
+                            self::KEY_CONTINUE => $curlHandles[$curlHandle][self::KEY_CONTINUE]
+                        ];
+                    }
+
+                }
+
+                unset($curlHandles[$curlHandle]);
+
+            }
+
+        } while ($stillRunning || count($curlHandles));
 
         curl_multi_close($multiHandle);
 
         return $results;
+    }
+
+    /**
+     * @throws \Exception
+     */
+    private function createHandleWithData(string $url): array
+    {
+        $fileName = $this->getFileNameFromUrl($url);
+        $filePath = self::TMP_DIRECTORY . '/' . $fileName;
+        $continue = false;
+        $lastByte = file_exists($filePath) ? filesize($filePath) : 0;
+        $fileResource = fopen($filePath, 'a+');
+
+        $curlHandle = curl_init();
+
+        if ($lastByte > 0) {
+            curl_setopt($curlHandle, CURLOPT_RANGE, "$lastByte-");
+            $continue = true;
+        }
+
+        curl_setopt_array($curlHandle, [
+            CURLOPT_URL              => $url,
+            CURLOPT_FILE             => $fileResource,
+            CURLOPT_CONNECTTIMEOUT   => 10,
+            CURLOPT_TIMEOUT          => 60,
+            CURLOPT_FAILONERROR      => true,
+            CURLOPT_NOPROGRESS       => false,
+            CURLOPT_PROGRESSFUNCTION => function ($curlHandle, $bytesToDownload, $bytesDownloaded) use (
+                $url,
+                $continue
+            ) {
+                static $lastProgress = [];
+
+                if ($bytesToDownload > 0) {
+                    if ($continue && !isset($lastProgress[$url])) {
+                        echo basename($url) . ' Resuming Download: ' . $bytesDownloaded . '/' . $bytesToDownload . "\n";
+                    }
+
+                    $percent = round(($bytesDownloaded / $bytesToDownload) * 100);
+                    if (!isset($lastProgress[$url]) || $percent - $lastProgress[$url] >= 5) {
+                        echo basename($url) . ' Downloaded: ' . $percent . "%\n";
+                        $lastProgress[$url] = $percent;
+                    }
+                }
+
+                return 0;
+            },
+        ]);
+
+        return [$curlHandle, $fileResource, $filePath, $continue];
     }
 
     private function moveFileToCompletedFolder(string $filePath): void
